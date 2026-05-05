@@ -14,13 +14,13 @@ import yfinance as yf
 
 from app_config import (
     DEFAULT_CURRENCY,
-    KNOWN_ETFS,
     MARKET_DATA_API_KEY,
     MARKET_DATA_API_URL,
     MAX_INVESTMENT_YEARS,
     MOCK_HISTORY_MONTHS,
     OPENFIGI_API_KEY,
     OPENFIGI_URL,
+    YAHOO_FINANCE_SEARCH_URL,
 )
 
 
@@ -68,19 +68,14 @@ def resolve_isin(isin: str) -> Dict[str, Any]:
     """Resolve an ISIN into ETF/security metadata.
 
     OpenFIGI is used when OPENFIGI_API_KEY is configured. Without a key, the
-    app uses a small curated local mapping for known ETFs.
+    app searches Yahoo Finance for a matching quoted symbol.
     """
     cleaned = clean_isin(isin)
     if not validate_isin(cleaned):
         raise ValueError("Please enter a valid 12-character ISIN.")
 
-    if not OPENFIGI_API_KEY and cleaned in KNOWN_ETFS:
-        return _known_etf_metadata(cleaned)
     if not OPENFIGI_API_KEY:
-        raise ValueError(
-            "This ISIN is not in the local ETF mapping. Configure OPENFIGI_API_KEY "
-            "to resolve arbitrary ISINs."
-        )
+        return _resolve_isin_with_yahoo_search(cleaned)
 
     headers = {
         "Content-Type": "application/json",
@@ -102,9 +97,13 @@ def resolve_isin(isin: str) -> Dict[str, Any]:
         raise ValueError("OpenFIGI did not return a match for this ISIN.")
 
     best_match = _pick_best_openfigi_match(matches)
+    yahoo_symbol = _to_yahoo_symbol(
+        best_match.get("ticker") or "",
+        best_match.get("exchCode") or best_match.get("marketSector") or "",
+    )
     return {
         "name": best_match.get("name") or "Unknown ETF",
-        "ticker": best_match.get("ticker") or "",
+        "ticker": yahoo_symbol,
         "display_ticker": best_match.get("ticker") or "",
         "exchange": best_match.get("exchCode") or best_match.get("marketSector") or "",
         "currency": best_match.get("currency") or DEFAULT_CURRENCY,
@@ -166,11 +165,56 @@ def _isin_character_value(character: str) -> str:
     return str(ord(character) - 55)
 
 
-def _known_etf_metadata(isin: str) -> Dict[str, Any]:
-    metadata = KNOWN_ETFS[isin].copy()
-    metadata["is_mock_data"] = False
-    metadata["metadata_source"] = "local_mapping"
-    return metadata
+def _resolve_isin_with_yahoo_search(isin: str) -> Dict[str, Any]:
+    params = {
+        "q": isin,
+        "quotes_count": 10,
+        "news_count": 0,
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+    }
+    response = requests.get(YAHOO_FINANCE_SEARCH_URL, params=params, headers=headers, timeout=15)
+    response.raise_for_status()
+    quotes = response.json().get("quotes", [])
+    if not quotes:
+        raise ValueError(
+            "Yahoo Finance could not resolve this ISIN. Configure OPENFIGI_API_KEY "
+            "for broader ISIN coverage."
+        )
+
+    best_quote = _pick_best_yahoo_quote(quotes)
+    symbol = best_quote.get("symbol") or ""
+    if not symbol:
+        raise ValueError("Yahoo Finance resolved this ISIN without a usable ticker symbol.")
+
+    return {
+        "name": best_quote.get("longname") or best_quote.get("shortname") or symbol,
+        "ticker": symbol,
+        "display_ticker": _display_ticker_from_yahoo_symbol(symbol),
+        "exchange": best_quote.get("exchDisp") or best_quote.get("exchange") or "",
+        "currency": _currency_from_listing(symbol, best_quote.get("exchDisp") or best_quote.get("exchange") or ""),
+        "figi": None,
+        "is_mock_data": False,
+        "metadata_source": "yahoo_search",
+    }
+
+
+def _pick_best_yahoo_quote(quotes: list[Dict[str, Any]]) -> Dict[str, Any]:
+    def score(quote: Dict[str, Any]) -> int:
+        quote_type = str(quote.get("quoteType", "")).upper()
+        symbol = str(quote.get("symbol", ""))
+        points = 0
+        if quote_type in {"ETF", "MUTUALFUND", "EQUITY"}:
+            points += 5
+        if "." in symbol:
+            points += 2
+        if quote.get("longname") or quote.get("shortname"):
+            points += 1
+        return points
+
+    return sorted(quotes, key=score, reverse=True)[0]
 
 
 def _pick_best_openfigi_match(matches: list[Dict[str, Any]]) -> Dict[str, Any]:
@@ -198,6 +242,59 @@ def _build_market_data_symbol(symbol: str, exchange: Optional[str]) -> str:
     if cleaned_exchange and cleaned_exchange not in cleaned_symbol:
         return f"{cleaned_symbol}:{cleaned_exchange}"
     return cleaned_symbol
+
+
+def _to_yahoo_symbol(ticker: str, exchange: str) -> str:
+    cleaned_ticker = (ticker or "").strip().upper()
+    cleaned_exchange = (exchange or "").strip().upper()
+    if not cleaned_ticker:
+        return ""
+    if "." in cleaned_ticker:
+        return cleaned_ticker
+
+    suffix_by_exchange = {
+        "LSE": ".L",
+        "LN": ".L",
+        "LONDON": ".L",
+        "MILAN": ".MI",
+        "MI": ".MI",
+        "MTAA": ".MI",
+        "BIT": ".MI",
+        "XETRA": ".DE",
+        "GY": ".DE",
+        "GERMANY": ".DE",
+        "AMS": ".AS",
+        "AMSTERDAM": ".AS",
+        "PARIS": ".PA",
+        "FP": ".PA",
+        "SIX": ".SW",
+        "SWISS": ".SW",
+    }
+    suffix = suffix_by_exchange.get(cleaned_exchange, "")
+    return f"{cleaned_ticker}{suffix}"
+
+
+def _display_ticker_from_yahoo_symbol(symbol: str) -> str:
+    return (symbol or "").split(".")[0]
+
+
+def _currency_from_listing(symbol: str, exchange: str) -> str:
+    suffix = ""
+    if "." in symbol:
+        suffix = symbol.rsplit(".", maxsplit=1)[-1].upper()
+
+    exchange_text = (exchange or "").upper()
+    if suffix == "L" or "LONDON" in exchange_text or exchange_text == "LSE":
+        return "GBP"
+    if suffix in {"MI", "DE", "AS", "PA"} or any(
+        market in exchange_text for market in ("MILAN", "XETRA", "AMSTERDAM", "PARIS", "EURONEXT")
+    ):
+        return "EUR"
+    if suffix == "SW" or "SWISS" in exchange_text:
+        return "CHF"
+    if suffix in {"", "US"} or any(market in exchange_text for market in ("NASDAQ", "NYSE", "AMEX")):
+        return "USD"
+    return DEFAULT_CURRENCY
 
 
 def _parse_market_data_payload(payload: Dict[str, Any]) -> pd.DataFrame:

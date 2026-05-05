@@ -19,31 +19,13 @@ DEFAULT_CURRENCY = "GBP"
 
 OPENFIGI_URL = "https://api.openfigi.com/v3/mapping"
 OPENFIGI_API_KEY = os.getenv("OPENFIGI_API_KEY", "")
+YAHOO_FINANCE_SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
 
 MARKET_DATA_API_URL = os.getenv(
     "MARKET_DATA_API_URL",
     "https://api.twelvedata.com/time_series",
 )
 MARKET_DATA_API_KEY = os.getenv("MARKET_DATA_API_KEY", "")
-
-KNOWN_ETFS = {
-    "IE00B4L5Y983": {
-        "name": "iShares Core MSCI World UCITS ETF USD (Acc)",
-        "ticker": "SWDA.L",
-        "display_ticker": "SWDA",
-        "exchange": "LSE",
-        "currency": "GBP",
-        "figi": None,
-    },
-    "IE00BK5BQT80": {
-        "name": "Vanguard FTSE All-World UCITS ETF USD Accumulating",
-        "ticker": "VWRP.L",
-        "display_ticker": "VWRP",
-        "exchange": "LSE",
-        "currency": "GBP",
-        "figi": None,
-    },
-}
 
 MOCK_HISTORY_MONTHS = 121
 PREFERRED_HISTORY_YEARS = 10
