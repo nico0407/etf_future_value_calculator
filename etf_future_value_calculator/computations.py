@@ -97,6 +97,66 @@ def calculate_yearly_returns(prices: pd.DataFrame) -> pd.DataFrame:
     return year_end_prices.dropna(subset=["yearly_return"]).reset_index(drop=True)
 
 
+def simulate_historical_monthly_accumulation(
+    prices: pd.DataFrame,
+    monthly_amount: float,
+    start_date,
+) -> pd.DataFrame:
+    """Simulate real monthly purchases from historical adjusted close prices."""
+    clean_prices = _clean_price_history(prices)
+    start_timestamp = pd.Timestamp(start_date)
+    investment_prices = clean_prices[clean_prices["date"] >= start_timestamp].copy()
+    if investment_prices.empty:
+        raise ValueError("The selected start date is after the latest available historical price.")
+
+    total_units = 0.0
+    total_contributed = 0.0
+    rows = []
+
+    for row in investment_prices.itertuples(index=False):
+        price = float(row.adjusted_close)
+        # Each monthly contribution buys fund units at that month's adjusted close price.
+        units_bought = monthly_amount / price
+        total_units += units_bought
+        total_contributed += monthly_amount
+        value = total_units * price
+
+        rows.append(
+            {
+                "date": row.date.date(),
+                "year": row.date.year,
+                "price": price,
+                "monthly_contribution": monthly_amount,
+                "units_bought": units_bought,
+                "total_units": total_units,
+                "contributed": total_contributed,
+                "value": value,
+                "growth": value - total_contributed,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def create_historical_yearly_summary(accumulation: pd.DataFrame) -> pd.DataFrame:
+    """Create a year-by-year summary from historical accumulation data."""
+    return (
+        accumulation.sort_values("date")
+        .groupby("year", as_index=False)
+        .tail(1)
+        .loc[:, ["year", "date", "contributed", "value", "growth", "total_units"]]
+        .rename(
+            columns={
+                "date": "period_end_date",
+                "contributed": "total_contributed",
+                "value": "current_value_at_period_end",
+                "growth": "investment_growth",
+            }
+        )
+        .reset_index(drop=True)
+    )
+
+
 def simulate_monthly_investment(
     monthly_amount: float,
     years: int,
@@ -143,3 +203,14 @@ def create_yearly_summary(projection: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index(drop=True)
     )
+
+
+def _clean_price_history(prices: pd.DataFrame) -> pd.DataFrame:
+    clean_prices = (
+        prices.loc[:, ["date", "adjusted_close"]]
+        .dropna()
+        .assign(date=lambda frame: pd.to_datetime(frame["date"]))
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+    return clean_prices[clean_prices["adjusted_close"] > 0]
